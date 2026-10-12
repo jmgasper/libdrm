@@ -80,4 +80,15 @@ struct drm_haiku_force_connector {
 
 #define DRM_HAIKU_IOCTL_FORCE_CONNECTOR	DRM_IOW(0xf4, struct drm_haiku_force_connector)
 
+/*	What writing /sys/module/<module>/parameters/<name> does on Linux: sets
+	one of the driver's module parameters (amdgpu's and drm's, as in its
+	settings file), which counts where Linux looks at it again; drm's "debug"
+	is. Primary nodes only. */
+struct drm_haiku_set_param {
+	char name[64];
+	char value[64];
+};
+
+#define DRM_HAIKU_IOCTL_SET_PARAM	DRM_IOW(0xf5, struct drm_haiku_set_param)
+
 #endif /* _DRM_HAIKU_H */
