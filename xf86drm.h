@@ -47,7 +47,8 @@ extern "C" {
 #define DRM_MAX_MINOR   64 /* deprecated */
 #endif
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__HAIKU__)
+/* Haiku: Linux's encoding, see drm.h */
 
 #define DRM_IOCTL_NR(n)		_IOC_NR(n)
 #define DRM_IOC_VOID		_IOC_NONE
@@ -982,6 +983,14 @@ drmGetFormatName(uint32_t format);
 #ifndef fourcc_mod_get_vendor
 #define fourcc_mod_get_vendor(modifier) \
        (((modifier) >> 56) & 0xff)
+#endif
+
+#ifdef __HAIKU__
+/* Haiku cannot mmap() a DRM file: these map and unmap a buffer object at the
+ * offset its driver's mmap ioctl returned, as mmap() and munmap() would. */
+extern void *drmHaikuMmap(void *addr, size_t length, int prot, int flags,
+                          int fd, off_t offset);
+extern int drmHaikuMunmap(void *addr, size_t length);
 #endif
 
 #if defined(__cplusplus)

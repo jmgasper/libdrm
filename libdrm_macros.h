@@ -45,7 +45,16 @@
 
 #include <sys/mman.h>
 
-#if defined(ANDROID) && !defined(__LP64__)
+#if defined(__HAIKU__)
+
+#include "xf86drm.h"
+
+#  define drm_mmap(addr, length, prot, flags, fd, offset) \
+              drmHaikuMmap(addr, length, prot, flags, fd, offset)
+#  define drm_munmap(addr, length) \
+              drmHaikuMunmap(addr, length)
+
+#elif defined(ANDROID) && !defined(__LP64__)
 #include <errno.h> /* for EINVAL */
 
 static inline void *drm_mmap(void *addr, size_t length, int prot, int flags,

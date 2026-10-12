@@ -121,6 +121,201 @@ struct drm_pciinfo {
 
 #define memclear(s) memset(&s, 0, sizeof(s))
 
+#ifdef __HAIKU__
+/*
+ * Haiku: the DRM driver is Linux's (amdgpu_drm), with its /dev/dri/card<minor>
+ * and renderD<minor> nodes, and some ioctls of its own (drm_haiku.h): devfs
+ * nodes have no device numbers, sysfs does not exist and a device cannot be
+ * mmap()ed.
+ *
+ * Device numbers are made up as Linux's would be (DRM_MAJOR, the DRM minor):
+ * stat() takes the minor from the node's name, fstat() asks the driver, so
+ * the code below that identifies nodes by their numbers works unchanged.
+ * PCI information comes from DRM_HAIKU_IOCTL_DEVICE_INFO.
+ */
+#include <pthread.h>
+#include <OS.h>
+#include "drm_haiku.h"
+
+/* <OS.h> has an ALIGN() of its own */
+#undef ALIGN
+#define ALIGN(value, alignment)    __align_mask(value, (__typeof__(value))((alignment) - 1))
+
+#ifndef major
+#define makedev(maj, min)	((dev_t)((((maj) & 0xffff) << 16) | ((min) & 0xffff)))
+#define major(dev)		((int)(((dev) >> 16) & 0xffff))
+#define minor(dev)		((int)((dev) & 0xffff))
+#endif
+
+static int drm_haiku_minor_from_name(const char *path)
+{
+    const char *name = strrchr(path, '/');
+    char *end;
+    long number;
+
+    if (name == NULL || (size_t)(name - path) != strlen(DRM_DIR_NAME)
+        || strncmp(path, DRM_DIR_NAME, name - path) != 0)
+        return -1;
+    name++;
+    if (strncmp(name, DRM_PRIMARY_MINOR_NAME,
+                strlen(DRM_PRIMARY_MINOR_NAME)) == 0)
+        name += strlen(DRM_PRIMARY_MINOR_NAME);
+    else if (strncmp(name, DRM_RENDER_MINOR_NAME,
+                     strlen(DRM_RENDER_MINOR_NAME)) == 0)
+        name += strlen(DRM_RENDER_MINOR_NAME);
+    else
+        return -1;
+    if (!isdigit((unsigned char)*name))
+        return -1;
+    number = strtol(name, &end, 10);
+    if (*end != '\0' || number > 255)
+        return -1;
+    return number;
+}
+
+static int drm_haiku_stat(const char *path, struct stat *sbuf)
+{
+    int min;
+
+    if (stat(path, sbuf))
+        return -1;
+    min = S_ISCHR(sbuf->st_mode) ? drm_haiku_minor_from_name(path) : -1;
+    sbuf->st_rdev = min >= 0 ? makedev(DRM_MAJOR, min) : 0;
+    return 0;
+}
+
+static int drm_haiku_fstat(int fd, struct stat *sbuf)
+{
+    struct drm_haiku_device_info info;
+
+    if (fstat(fd, sbuf))
+        return -1;
+    memclear(info);
+    if (S_ISCHR(sbuf->st_mode)
+        && ioctl(fd, DRM_HAIKU_IOCTL_DEVICE_INFO, &info, sizeof(info)) == 0)
+        sbuf->st_rdev = makedev(DRM_MAJOR, info.minor);
+    else
+        sbuf->st_rdev = 0;
+    return 0;
+}
+
+#define stat(path, sbuf)	drm_haiku_stat(path, sbuf)
+#define fstat(fd, sbuf)		drm_haiku_fstat(fd, sbuf)
+
+static int drmOpenMinor(int minor, int create, int type);
+
+/* The PCI information of a DRM minor; it does not change, so it is asked
+ * for once. */
+static int drm_haiku_device_info(int min, struct drm_haiku_device_info *info)
+{
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    static struct drm_haiku_device_info cache[256];
+    static bool cached[256];
+    int fd, type;
+
+    if (min < 0 || min > 255)
+        return -EINVAL;
+    pthread_mutex_lock(&lock);
+    if (cached[min]) {
+        *info = cache[min];
+        pthread_mutex_unlock(&lock);
+        return 0;
+    }
+    pthread_mutex_unlock(&lock);
+
+    type = min >= 128 ? DRM_NODE_RENDER : DRM_NODE_PRIMARY;
+    fd = drmOpenMinor(min, 0, type);
+    if (fd < 0)
+        return -errno;
+    memclear(*info);
+    if (ioctl(fd, DRM_HAIKU_IOCTL_DEVICE_INFO, info, sizeof(*info))) {
+        int error = -errno;
+        close(fd);
+        return error;
+    }
+    close(fd);
+
+    pthread_mutex_lock(&lock);
+    cache[min] = *info;
+    cached[min] = true;
+    pthread_mutex_unlock(&lock);
+    return 0;
+}
+
+/* Mappings of buffer objects: what drm_mmap() mapped and through which DRM
+ * file, so drm_munmap() can unmap it there. */
+struct drm_haiku_mapping {
+    struct drm_haiku_mapping *next;
+    void *address;
+    int fd;
+    area_id area;
+};
+
+static pthread_mutex_t drm_haiku_mappings_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct drm_haiku_mapping *drm_haiku_mappings;
+
+drm_public void *drmHaikuMmap(void *addr, size_t length, int prot, int flags,
+                              int fd, off_t offset)
+{
+    struct drm_haiku_mapping *mapping;
+    struct drm_haiku_map map;
+
+    mapping = malloc(sizeof(*mapping));
+    if (mapping == NULL) {
+        errno = ENOMEM;
+        return MAP_FAILED;
+    }
+    memclear(map);
+    map.offset = offset;
+    map.size = (length + B_PAGE_SIZE - 1) & ~(size_t)(B_PAGE_SIZE - 1);
+    map.flags = (prot & PROT_WRITE) ? DRM_HAIKU_MAP_WRITE : 0;
+    map.address = (flags & MAP_FIXED) ? (uintptr_t)addr : 0;
+    if (drmIoctl(fd, DRM_HAIKU_IOCTL_MAP, &map)) {
+        free(mapping);
+        return MAP_FAILED;
+    }
+    mapping->address = (void *)(uintptr_t)map.address;
+    mapping->fd = fd;
+    mapping->area = map.area;
+    pthread_mutex_lock(&drm_haiku_mappings_lock);
+    mapping->next = drm_haiku_mappings;
+    drm_haiku_mappings = mapping;
+    pthread_mutex_unlock(&drm_haiku_mappings_lock);
+    return mapping->address;
+}
+
+drm_public int drmHaikuMunmap(void *addr, size_t length)
+{
+    struct drm_haiku_mapping **link, *mapping = NULL;
+    struct drm_haiku_unmap unmap;
+
+    pthread_mutex_lock(&drm_haiku_mappings_lock);
+    for (link = &drm_haiku_mappings; *link != NULL; link = &(*link)->next) {
+        if ((*link)->address == addr) {
+            mapping = *link;
+            *link = mapping->next;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&drm_haiku_mappings_lock);
+    if (mapping == NULL)
+        return munmap(addr, length);
+
+    memclear(unmap);
+    unmap.address = (uintptr_t)addr;
+    if (drmIoctl(mapping->fd, DRM_HAIKU_IOCTL_UNMAP, &unmap)) {
+        /* the file was closed (and its mappings with it) or is another one
+         * by now: the area is the team's to delete */
+        area_info info;
+        if (get_area_info(mapping->area, &info) == B_OK
+            && info.address == addr)
+            delete_area(mapping->area);
+    }
+    free(mapping);
+    return 0;
+}
+#endif /* __HAIKU__ */
+
 static drmServerInfoPtr drm_server_info;
 
 static bool drmNodeIsDRM(int maj, int min);
@@ -3496,6 +3691,32 @@ static char *drmGetMinorNameForFD(int fd, int type)
          id + drmGetMinorBase(type));
 
     return strdup(name);
+#elif defined(__HAIKU__)
+    struct stat sbuf;
+    char buf[PATH_MAX + 1];
+    const char *dev_name = drmGetDeviceName(type);
+    int maj, min, nodetype, n;
+
+    if (fstat(fd, &sbuf))
+        return NULL;
+
+    maj = major(sbuf.st_rdev);
+    min = minor(sbuf.st_rdev);
+
+    if (!drmNodeIsDRM(maj, min) || !S_ISCHR(sbuf.st_mode) || !dev_name)
+        return NULL;
+
+    /* the same device's node of the other type: the same index */
+    nodetype = drmGetMinorType(maj, min);
+    if (nodetype == -1)
+        return NULL;
+    min = min - drmGetMinorBase(nodetype) + drmGetMinorBase(type);
+
+    n = snprintf(buf, sizeof(buf), dev_name, DRM_DIR_NAME, min);
+    if (n == -1 || n >= sizeof(buf) || access(buf, F_OK))
+        return NULL;
+
+    return strdup(buf);
 #else
     struct stat sbuf;
     char buf[PATH_MAX + 1];
@@ -3639,7 +3860,8 @@ static int drmParseSubsystemType(int maj, int min)
             return DRM_BUS_VIRTIO;
      }
     return subsystem_type;
-#elif defined(__OpenBSD__) || defined(__DragonFly__) || defined(__FreeBSD__)
+#elif defined(__OpenBSD__) || defined(__DragonFly__) || defined(__FreeBSD__) \
+    || defined(__HAIKU__)
     return DRM_BUS_PCI;
 #else
 #warning "Missing implementation of drmParseSubsystemType"
@@ -3773,6 +3995,17 @@ static int drmParsePciBusInfo(int maj, int min, drmPciBusInfoPtr info)
     return 0;
 #elif defined(__FreeBSD__)
     return get_sysctl_pci_bus_info(maj, min, info);
+#elif defined(__HAIKU__)
+    struct drm_haiku_device_info dinfo;
+    int ret = drm_haiku_device_info(min, &dinfo);
+
+    if (ret)
+        return ret;
+    info->domain = dinfo.domain;
+    info->bus = dinfo.bus;
+    info->dev = dinfo.dev;
+    info->func = dinfo.func;
+    return 0;
 #else
 #warning "Missing implementation of drmParsePciBusInfo"
     return -EINVAL;
@@ -3984,6 +4217,18 @@ static int drmParsePciDeviceInfo(int maj, int min,
     device->subdevice_id = results[0].pc_subdevice;
     device->revision_id = results[0].pc_revid;
 
+    return 0;
+#elif defined(__HAIKU__)
+    struct drm_haiku_device_info info;
+    int ret = drm_haiku_device_info(min, &info);
+
+    if (ret)
+        return ret;
+    device->vendor_id = info.vendor_id;
+    device->device_id = info.device_id;
+    device->subvendor_id = info.subvendor_id;
+    device->subdevice_id = info.subdevice_id;
+    device->revision_id = info.revision_id;
     return 0;
 #else
 #warning "Missing implementation of drmParsePciDeviceInfo"

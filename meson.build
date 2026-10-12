@@ -207,6 +207,14 @@ libdrm_c_args = cc.get_supported_arguments([
   '-Wno-unused-parameter', '-Wno-attributes', '-Wno-long-long',
   '-Wno-missing-field-initializers'])
 
+# Haiku's POSIX error numbers are negative; libdrm returns them negated, as
+# Linux code (Mesa) expects, when built with positive ones, which the
+# posix_error_mapper library provides (its users are built likewise).
+if host_machine.system() == 'haiku'
+  libdrm_c_args += ['-DB_USE_POSITIVE_POSIX_ERRORS']
+  dep_rt += [cc.find_library('posix_error_mapper', static : true)]
+endif
+
 dep_cairo = dependency('cairo', required : get_option('cairo-tests'))
 with_cairo_tests = dep_cairo.found()
 
@@ -314,6 +322,9 @@ install_headers(
 )
 if with_vmwgfx
   install_headers('include/drm/vmwgfx_drm.h', subdir : 'libdrm')
+endif
+if host_machine.system() == 'haiku'
+  install_headers('include/drm/drm_haiku.h', subdir : 'libdrm')
 endif
 
 pkg.generate(
