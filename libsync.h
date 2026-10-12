@@ -40,6 +40,11 @@
 extern "C" {
 #endif
 
+#ifdef __HAIKU__
+/* Linux's ioctl encoding, as amdgpu_drm decodes it (see drm.h) */
+#include <drm.h>
+#endif
+
 #ifndef SYNC_IOC_MERGE
 /* duplicated from linux/sync_file.h to avoid build-time dependency
  * on new (v4.7) kernel headers.  Once distro's are mostly using
