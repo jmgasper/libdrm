@@ -13,6 +13,16 @@ but a new libdrm will always work with an older kernel.
 libdrm is a low-level library, typically used by graphics drivers such as
 the Mesa drivers, the X drivers, libva and similar projects.
 
+air/OS (Haiku) branch
+---------------------
+
+The ``airos-2.4.134`` branch adds Haiku support for air/OS's amdgpu_drm
+driver (https://github.com/jmgasper/linux-drm) on top of libdrm 2.4.134:
+device discovery through ``/dev/dri``, buffer mapping and the other
+Haiku-only requests declared in ``include/drm/drm_haiku.h``, and Linux's
+ioctl encoding on Haiku. Like the rest of libdrm, the changes are under the
+MIT licence written out in the headers of the files they are in.
+
 Syncing with the Linux kernel headers
 -------------------------------------
 
