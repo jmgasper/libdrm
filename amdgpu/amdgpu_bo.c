@@ -301,6 +301,15 @@ drm_public int amdgpu_bo_import(amdgpu_device_handle dev,
 
 	case amdgpu_bo_handle_type_kms:
 	case amdgpu_bo_handle_type_kms_noimport:
+#ifdef __HAIKU__
+		/* A handle the caller got on this device's file from amdgpu_drm
+		 * itself (DRM_HAIKU_IOCTL_SCANOUT: the screen's frame buffer), where
+		 * Linux would pass a dma-buf. The buffer object takes it over. */
+		if (type == amdgpu_bo_handle_type_kms) {
+			bo = handle_table_lookup(&dev->bo_handles, shared_handle);
+			break;
+		}
+#endif
 		/* Importing a KMS handle in not allowed. */
 		r = -EPERM;
 		goto unlock;
@@ -353,8 +362,27 @@ drm_public int amdgpu_bo_import(amdgpu_device_handle dev,
 		alloc_size = dma_buf_size;
 		break;
 
+#ifdef __HAIKU__
+	case amdgpu_bo_handle_type_kms: {
+		struct drm_amdgpu_gem_create_in bo_info = {};
+		struct drm_amdgpu_gem_op gem_op = {};
+
+		handle = shared_handle;
+		gem_op.handle = handle;
+		gem_op.op = AMDGPU_GEM_OP_GET_GEM_CREATE_INFO;
+		gem_op.value = (uintptr_t)&bo_info;
+		r = drmCommandWriteRead(dev->fd, DRM_AMDGPU_GEM_OP,
+					&gem_op, sizeof(gem_op));
+		if (r)
+			goto free_bo_handle;
+		alloc_size = bo_info.bo_size;
+		break;
+	}
+	case amdgpu_bo_handle_type_kms_noimport:
+#else
 	case amdgpu_bo_handle_type_kms:
 	case amdgpu_bo_handle_type_kms_noimport:
+#endif
 		assert(0); /* unreachable */
 	}
 
